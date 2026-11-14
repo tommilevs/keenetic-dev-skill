@@ -13,7 +13,7 @@ SELF_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF_DIR="$(cd "$SELF_BIN/.." && pwd)"
 VERSION_FILE="$SELF_DIR/VERSION"
 CONFIG_FILE="${KEENETIC_DEV_CONFIG:-$SELF_DIR/config.env}"
-REPO_SLUG="tommilevs/keenetic-dev-skill"
+REPO_SLUG="tommilevs/keenetic-netcraze-router-dev-skill"
 REPO_RAW="https://raw.githubusercontent.com/$REPO_SLUG/main"
 
 # ── pretty output ────────────────────────────────────────────────────────────
@@ -746,7 +746,7 @@ cmd_update() {
   step "downloading $remote_v"
   local tmp; tmp="$(mktemp -d)"
   curl -fsSL "https://codeload.github.com/$REPO_SLUG/tar.gz/refs/heads/main" | tar -xz -C "$tmp" || die "download failed"
-  local src="$tmp/keenetic-dev-skill-main"
+  local src="$tmp/keenetic-netcraze-router-dev-skill-main"
   [ -d "$src" ] || src="$(find "$tmp" -maxdepth 1 -type d -name '*-main' | head -1)"
   [ -d "$src" ] || die "unexpected archive layout"
   ( cd "$src" && find . -type f ! -name 'config.env' -print0 | \

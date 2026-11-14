@@ -1,7 +1,7 @@
 ---
-name: keenetic-dev
+name: keenetic-netcraze-router-dev-skill
 description: Build, package and deploy applications for Keenetic/Netcraze routers running Entware. Use when creating or shipping a Go app for a Keenetic router — cross-compiling for aarch64/armv7/mipsel/mips, building legacy ipkg .ipk files, publishing an opkg feed with vendored Samba dependencies, deploying over SSH, running on-router QA, or changing the panel password.
-homepage: https://github.com/tommilevs/keenetic-dev-skill
+homepage: https://github.com/tommilevs/keenetic-netcraze-router-dev-skill
 metadata: {"clawdbot":{"emoji":"📦","requires":{"bins":["bash","ssh","sshpass","scp","tar","gzip","curl","python3","git"]}}}
 ---
 
@@ -52,7 +52,7 @@ keenetic-dev qa
 | `logs [--which app|samba]` | tail logs |
 | `setpass <new>` | change panel + SMB admin password, verify login, roll back on failure |
 | `ssh <cmd>` | run a shell command on the router |
-| `update [--check]` | self-update from `tommilevs/keenetic-dev-skill` (git pull or tarball) |
+| `update [--check]` | self-update from `tommilevs/keenetic-netcraze-router-dev-skill` (git pull or tarball) |
 
 ## Entware architecture strings (use exactly these)
 
@@ -121,6 +121,6 @@ for CI: `ROUTER_HOST`, `ROUTER_PORT`, `ROUTER_USER`, `ROUTER_PASS`,
 ## Self-update
 
 `keenetic-dev update --check` compares local `VERSION` with
-`tommilevs/keenetic-dev-skill`; `keenetic-dev update` runs `git pull --ff-only`
+`tommilevs/keenetic-netcraze-router-dev-skill`; `keenetic-dev update` runs `git pull --ff-only`
 when the skill is a clone, otherwise downloads the branch tarball and copies files
 (keeping `config.env` untouched).

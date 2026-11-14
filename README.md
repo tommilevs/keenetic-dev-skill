@@ -1,4 +1,4 @@
-# keenetic-dev — toolkit for Keenetic / Netcraze apps on Entware
+# keenetic-netcraze-router-dev-skill — toolkit for Keenetic / Netcraze apps on Entware
 
 One CLI that covers the whole loop: scaffold → cross-compile → package `.ipk` →
 build an opkg feed (with vendored dependencies) → deploy to the router → QA on the
@@ -24,7 +24,7 @@ keenetic-dev doctor
 ## Install
 
 ```sh
-git clone https://github.com/tommilevs/keenetic-dev-skill \
+git clone https://github.com/tommilevs/keenetic-netcraze-router-dev-skill \
   /mnt/c/Users/tommi/.agents/skills/keenetic-dev
 cp /mnt/c/Users/tommi/.agents/skills/keenetic-dev/config.example.env \
    /mnt/c/Users/tommi/.agents/skills/keenetic-dev/config.env   # fill credentials
