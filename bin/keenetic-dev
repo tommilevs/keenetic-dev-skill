@@ -476,6 +476,11 @@ cmd_vendor() {
   ARCHS="$arches" ROOTS="$roots" OUT="$out" python3 - <<'PY'
 import gzip, io, json, os, re, subprocess, sys, urllib.request
 arches = os.environ["ARCHS"].split()
+# package architecture strings → Entware feed directories
+FEED = {"aarch64-3.10": "aarch64-k3.10", "armv7-3.2": "armv7sf-k3.2",
+        "mipsel-3.4": "mipselsf-k3.4", "mips-3.4": "mipssf-k3.4",
+        "x64-3.2": "x64-k3.2", "x86-2.6": "x86-k2.6"}
+arches = [FEED.get(a, a) for a in arches]
 roots = [r.strip() for r in os.environ["ROOTS"].split(",") if r.strip()]
 out = os.environ["OUT"]
 report = []
@@ -517,10 +522,13 @@ for arch in arches:
     rows, total = [], 0
     for name in sorted(need):
         p = pkgs[name]
-        fn = os.path.basename(p.get("Filename", ""))
+        rel = p.get("Filename", "")
+        if rel.startswith("./"):
+            rel = rel[2:]
+        fn = os.path.basename(rel)
         dest = os.path.join(archdir, fn)
         if not os.path.exists(dest):
-            open(dest, "wb").write(fetch(f"https://bin.entware.net/{arch}/{p['Filename']}"))
+            open(dest, "wb").write(fetch(f"https://bin.entware.net/{arch}/{rel}"))
         size = os.path.getsize(dest); total += size
         rows.append({"Package": name, "Version": p.get("Version", ""), "Depends": p.get("Depends", ""),
                      "Architecture": p.get("Architecture", ""), "FileName": fn, "Size": size})
@@ -607,7 +615,7 @@ cmd_status() {
   step "panel"
   rssh "curl -s --max-time 5 http://127.0.0.1:$APP_PORT/api/session || echo no-answer"
   step "listeners"
-  rssh "netstat -lntp 2>/dev/null | grep -E '(:$APP_PORT|:$SMB_IP)' || echo none"
+  rssh "netstat -lntp 2>/dev/null | grep -E ':$APP_PORT|$SMB_IP:445' || echo none"
 }
 
 cmd_qa() {
