@@ -1,0 +1,5 @@
+#!/bin/sh
+# prerm for __APP__
+[ -n "$IPKG_INSTROOT" ] && exit 0
+/opt/etc/init.d/S99__APP__ stop >/dev/null 2>&1
+exit 0

@@ -1,0 +1,13 @@
+#!/bin/sh
+# postinst for __APP__
+[ -n "$IPKG_INSTROOT" ] && exit 0
+
+mkdir -p /opt/var/__APP__/log /opt/var/run
+[ -f /opt/etc/__APP__/config.json ] || cp /opt/etc/__APP__/config.default.json /opt/etc/__APP__/config.json 2>/dev/null || true
+chmod 600 /opt/etc/__APP__/config.json 2>/dev/null || true
+chmod 755 /opt/bin/__APP__ /opt/etc/init.d/S99__APP__ 2>/dev/null || true
+
+/opt/etc/init.d/S99__APP__ stop >/dev/null 2>&1
+/opt/etc/init.d/S99__APP__ start >/dev/null 2>&1
+echo "__APP__: панель на http://<ip-роутера>:8099"
+exit 0

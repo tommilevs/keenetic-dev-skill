@@ -1,0 +1,736 @@
+#!/usr/bin/env bash
+# keenetic-dev — toolkit for building, packaging and deploying applications for
+# Keenetic / Netcraze routers running Entware.
+#
+# Run it from WSL (Linux tools: ssh, sshpass, tar, gzip, curl, python3) and it will
+# call the Windows Go toolchain for cross-compilation when needed.
+#
+# Layout: <skill>/bin/keenetic-dev, <skill>/VERSION, <skill>/config.env, templates/.
+
+set -uo pipefail
+
+SELF_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_DIR="$(cd "$SELF_BIN/.." && pwd)"
+VERSION_FILE="$SELF_DIR/VERSION"
+CONFIG_FILE="${KEENETIC_DEV_CONFIG:-$SELF_DIR/config.env}"
+REPO_SLUG="tommilevs/keenetic-dev-skill"
+REPO_RAW="https://raw.githubusercontent.com/$REPO_SLUG/main"
+
+# ── pretty output ────────────────────────────────────────────────────────────
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_B=$'\033[1m'
+  C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_ACC=$'\033[36m'
+else
+  C_RESET=""; C_DIM=""; C_B=""; C_OK=""; C_WARN=""; C_ERR=""; C_ACC=""
+fi
+log()  { printf '%s\n' "$*"; }
+step() { printf '%s==>%s %s\n' "$C_ACC" "$C_RESET" "$*"; }
+ok()   { printf '%s  ok%s %s\n' "$C_OK" "$C_RESET" "$*"; }
+warn() { printf '%s warn%s %s\n' "$C_WARN" "$C_RESET" "$*" >&2; }
+die()  { printf '%s fail%s %s\n' "$C_ERR" "$C_RESET" "$*" >&2; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
+
+version() {
+  local v="unknown"
+  [ -f "$VERSION_FILE" ] && v="$(cat "$VERSION_FILE")"
+  local sha=""
+  if git -C "$SELF_DIR" rev-parse --short HEAD >/dev/null 2>&1; then
+    sha=" ($(git -C "$SELF_DIR" rev-parse --short HEAD))"
+  fi
+  printf 'keenetic-dev %s%s\n' "$v" "$sha"
+}
+
+# ── config ───────────────────────────────────────────────────────────────────
+load_config() {
+  if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck disable=SC1090
+    set -a; . "$CONFIG_FILE"; set +a
+  fi
+  : "${ROUTER_HOST:=192.168.165.1}"
+  : "${ROUTER_PORT:=222}"
+  : "${ROUTER_USER:=root}"
+  : "${ROUTER_PASS:=}"
+  : "${APP_PANEL_USER:=admin}"
+  : "${APP_PANEL_PASS:=}"
+  : "${APP_NAME:=keenetic-smb-ui}"
+  : "${APP_BIN:=/opt/bin/$APP_NAME}"
+  : "${APP_INIT:=/opt/etc/init.d/S99$APP_NAME}"
+  : "${APP_CFG_DIR:=/opt/etc/$APP_NAME}"
+  : "${APP_LOG_DIR:=/opt/var/$APP_NAME/log}"
+  : "${APP_PORT:=8099}"
+  : "${SMB_IP:=192.168.160.2}"
+  if [ -z "${GO_BIN:-}" ]; then
+    if command -v go.exe >/dev/null 2>&1; then GO_BIN="go.exe"
+    elif [ -x /mnt/c/workspace/tools/go/bin/go.exe ]; then GO_BIN=/mnt/c/workspace/tools/go/bin/go.exe
+    else GO_BIN="go"; fi
+  fi
+}
+
+# ── ssh helpers ──────────────────────────────────────────────────────────────
+rssh() {
+  [ -n "${ROUTER_PASS:-}" ] || die "ROUTER_PASS is empty (check $CONFIG_FILE)"
+  sshpass -p "$ROUTER_PASS" ssh \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+    -o LogLevel=ERROR -p "$ROUTER_PORT" "$ROUTER_USER@$ROUTER_HOST" "$@" </dev/null
+}
+rscp() { # local -> remote
+  sshpass -p "$ROUTER_PASS" scp -O -q -P "$ROUTER_PORT" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$1" "$ROUTER_USER@$ROUTER_HOST:$2"
+}
+router_alive() { rssh 'echo __alive__' 2>/dev/null | grep -q __alive__; }
+
+# ── commands ─────────────────────────────────────────────────────────────────
+cmd_version() { version; }
+
+cmd_help() {
+  cat <<EOF
+keenetic-dev $(cat "$VERSION_FILE" 2>/dev/null || echo '?') — Keenetic/Entware app toolkit
+
+USAGE
+  keenetic-dev <command> [options]
+
+PROJECT
+  init <dir> --module <go module> [--name <pkg>] [--port 8099]
+                          scaffold a new Go app for Entware (ui, config, packaging)
+  build [--project DIR] [--version V] [--arch GOARCH ...]
+                          cross-compile static binaries into <project>/dist
+  ipk --bin FILE --arch ENTWARE_ARCH [--version V] [--project DIR]
+                          build a legacy gzip-tar .ipk (Entware layout)
+  feed --dir DIR [--version V]
+                          generate Packages / Packages.gz from *.ipk in DIR
+  vendor --arch ENTWARE_ARCH [--root PKG[,PKG]] [--out DIR]
+                          download Samba dependency closure from Entware
+  publish --repo OWNER/REPO --tag TAG --dir DIR [--notes FILE] [--name TITLE]
+                          create a GitHub release and upload every file in DIR
+  deploy [--bin FILE] [--build] [--project DIR]
+                          install the binary on the router, restart, health-check
+  qa                      functional checks on the router (service/api/smb/disks)
+  status                  package, service, panel version, SMB listener
+  logs [--which app|samba] [--lines N]
+  setpass <new-password>  change panel + admin SMB password and verify
+  ssh <command>           run a shell command on the router
+  config                  show effective config (secrets masked)
+
+SELF
+  version                 print version and git sha
+  update [--check]        self-update from $REPO_SLUG
+  doctor                  check local tools, config and router reachability
+
+ENVIRONMENT
+  KEENETIC_DEV_CONFIG     path to config.env (default: <skill>/config.env)
+  ROUTER_HOST ROUTER_PORT ROUTER_USER ROUTER_PASS  router access
+  APP_PANEL_USER APP_PANEL_PASS                    web panel credentials
+  GO_BIN                                           Go binary (go.exe from WSL)
+EOF
+}
+
+cmd_config() {
+  load_config
+  mask() { local v="${1:-}"; if [ -n "$v" ]; then printf '%s***' "${v:0:2}"; else printf '<empty>'; fi; }
+  printf '%-16s %s\n' ROUTER_HOST "$ROUTER_HOST"
+  printf '%-16s %s\n' ROUTER_PORT "$ROUTER_PORT"
+  printf '%-16s %s\n' ROUTER_USER "$ROUTER_USER"
+  printf '%-16s %s\n' ROUTER_PASS "$(mask "$ROUTER_PASS")"
+  printf '%-16s %s\n' APP_NAME "$APP_NAME"
+  printf '%-16s %s\n' APP_PANEL_USER "$APP_PANEL_USER"
+  printf '%-16s %s\n' APP_PANEL_PASS "$(mask "$APP_PANEL_PASS")"
+  printf '%-16s %s\n' GO_BIN "$GO_BIN"
+  printf '%-16s %s\n' CONFIG_FILE "$CONFIG_FILE"
+}
+
+cmd_doctor() {
+  load_config
+  step "local tools"
+  local t
+  for t in bash ssh sshpass scp tar gzip curl python3 git; do
+    if command -v "$t" >/dev/null 2>&1; then ok "$t"; else warn "$t missing"; fi
+  done
+  if command -v jq >/dev/null 2>&1; then ok "jq"; else warn "jq missing (optional)"; fi
+  step "go toolchain"
+  if "$GO_BIN" version >/dev/null 2>&1; then ok "$("$GO_BIN" version | tr -d '\r')"; else warn "no Go at $GO_BIN"; fi
+  step "router"
+  if router_alive; then
+    ok "ssh $ROUTER_USER@$ROUTER_HOST:$ROUTER_PORT"
+    local info
+    info=$(rssh 'uname -m; cat /etc/openwrt_release 2>/dev/null | head -1; opkg print-architecture 2>/dev/null | head -2')
+    log "$info"
+    if rssh 'opkg list-installed 2>/dev/null | grep -q "^keenetic-smb-ui "'; then
+      ok "app installed: $(rssh 'opkg list-installed | grep "^keenetic-smb-ui " | awk "{print \$3}"')"
+    else
+      warn "keenetic-smb-ui is not installed (or APP_NAME differs)"
+    fi
+  else
+    warn "router is not reachable over ssh"
+  fi
+  step "panel"
+  local code
+  code=$(rssh "curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:$APP_PORT/api/session" 2>/dev/null)
+  [ "$code" = "200" ] && ok "panel http://$ROUTER_HOST:$APP_PORT (200)" || warn "panel http $code"
+}
+
+# ── scaffold ─────────────────────────────────────────────────────────────────
+cmd_init() {
+  local dir="" module="" name="" port="8099"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --module) module="$2"; shift 2;;
+      --name) name="$2"; shift 2;;
+      --port) port="$2"; shift 2;;
+      -*) die "unknown option $1";;
+      *) dir="$1"; shift;;
+    esac
+  done
+  [ -n "$dir" ] || die "usage: keenetic-dev init <dir> --module github.com/you/app"
+  [ -n "$module" ] || die "--module is required"
+  [ -n "$name" ] || name="$(basename "$dir")"
+  local tpl="$SELF_DIR/templates/app"
+  [ -d "$tpl" ] || die "templates not found at $tpl"
+  [ -e "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ] && die "$dir is not empty"
+
+  mkdir -p "$dir"
+  cp -a "$tpl/." "$dir/"
+  # substitute placeholders
+  find "$dir" -type f \( -name '*.go' -o -name 'go.mod' -o -name '*.json' -o -name 'control' -o -name 'postinst' -o -name 'prerm' -o -name 'Makefile' -o -name '*.html' -o -name 'init.d' \) -print0 |
+  while IFS= read -r -d '' f; do
+    sed -i "s|__MODULE__|$module|g; s|__APP__|$name|g; s|__PORT__|$port|g" "$f"
+  done
+  chmod +x "$dir"/packaging/postinst "$dir"/packaging/prerm 2>/dev/null || true
+  ( cd "$dir" && git init -q 2>/dev/null || true )
+  printf '{ "name": "%s", "port": "%s" }\n' "$name" "$port" > "$dir/.keenetic-dev.json"
+  ok "scaffolded $dir ($name, port $port)"
+  log "next:"
+  log "  cd $dir && keenetic-dev build --version 0.1.0"
+  log "  keenetic-dev ipk --bin dist/${name}_linux --arch aarch64-3.10 --version 0.1.0"
+  log "  keenetic-dev deploy --bin dist/${name}_linux"
+}
+
+# ── build ────────────────────────────────────────────────────────────────────
+arch_to_entware() {
+  case "$1" in
+    arm64)  echo "aarch64-3.10";;
+    arm)    echo "armv7-3.2";;
+    mipsle) echo "mipsel-3.4";;
+    mips)   echo "mips-3.4";;
+    amd64)  echo "x64-3.2";;
+    386)    echo "x86-2.6";;
+    *) return 1;;
+  esac
+}
+ALL_GOARCH="arm64 arm mipsle mips amd64 386"
+
+project_name() {
+  local project="$1" n=""
+  if [ -f "$project/.keenetic-dev.json" ]; then
+    n="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$project/.keenetic-dev.json" | head -1)"
+  fi
+  [ -n "$n" ] || n="$(basename "$project")"
+  printf '%s' "$n"
+}
+
+project_version() {
+  local project="$1" v="${2:-}"
+  if [ -n "$v" ]; then echo "$v"; return; fi
+  if [ -f "$project/VERSION" ]; then tr -d ' \r\n' < "$project/VERSION"; return; fi
+  if git -C "$project" describe --tags --abbrev=0 >/dev/null 2>&1; then
+    git -C "$project" describe --tags --abbrev=0 | tr -d '\r'; return
+  fi
+  echo "0.0.0"
+}
+
+cmd_build() {
+  local project="$PWD" ver="" arches="" ldvar="" name=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) project="$2"; shift 2;;
+      --version) ver="$2"; shift 2;;
+      --arch) arches="$arches $2"; shift 2;;
+      --all) arches="$ALL_GOARCH"; shift;;
+      --ldvar) ldvar="$2"; shift 2;;
+      --name) name="$2"; shift 2;;
+      -*) die "unknown option $1";;
+      *) shift;;
+    esac
+  done
+  load_config
+  need_go
+  [ -d "$project" ] || die "no such project: $project"
+  project="$(cd "$project" && pwd)"
+  ver="$(project_version "$project" "$ver")"
+  [ -n "$name" ] || name="$(project_name "$project")"
+  [ -n "$arches" ] || arches="$ALL_GOARCH"
+  if [ -z "$ldvar" ]; then
+    local module
+    module="$(awk '/^module[[:space:]]/{print $2; exit}' "$project/go.mod" 2>/dev/null | tr -d '\r')"
+    [ -n "$module" ] && ldvar="$module/internal/web.Version"
+  fi
+  go_require_windows_path "$project"
+  mkdir -p "$project/dist"
+  step "build $name $ver"
+  local a out out_arg rc=0 ent
+  for a in $arches; do
+    out="$project/dist/${name}_linux_$a"
+    out_arg="$(go_path "$out")"
+    ent="$(arch_to_entware "$a" || echo "$a")"
+    if [ -n "$ldvar" ]; then
+      ( cd "$project" && GOOS=linux GOARCH="$a" CGO_ENABLED=0 GOFLAGS=-buildvcs=false \
+          "$GO_BIN" build -trimpath -ldflags "-s -w -X $ldvar=$ver" -o "$out_arg" ./cmd/... ) \
+        2>"/tmp/keenetic-dev-build-$a.log"
+    else
+      ( cd "$project" && GOOS=linux GOARCH="$a" CGO_ENABLED=0 GOFLAGS=-buildvcs=false \
+          "$GO_BIN" build -trimpath -o "$out_arg" ./cmd/... ) 2>"/tmp/keenetic-dev-build-$a.log"
+    fi
+    if [ -f "$out" ]; then
+      ok "$(basename "$out") ($(du -h "$out" | cut -f1))  $ent"
+    else
+      warn "build failed for $a:"; sed 's/^/     /' "/tmp/keenetic-dev-build-$a.log" | head -20; rc=1
+    fi
+  done
+  [ "$rc" -eq 0 ] && ok "done: $project/dist" || die "some architectures failed"
+}
+
+# The Windows Go toolchain cannot read the WSL-only filesystem (/tmp, /home):
+# projects must live under /mnt/<drive>/… and paths are converted for the build.
+go_is_windows() { case "$GO_BIN" in *.exe) return 0;; *) return 1;; esac; }
+
+need_go() {
+  command -v "$GO_BIN" >/dev/null 2>&1 || die "Go not found: $GO_BIN (set GO_BIN in config.env)"
+}
+
+go_require_windows_path() {
+  go_is_windows || return 0
+  case "$1" in
+    /mnt/[a-z]/*) ;;
+    *) die "with the Windows Go toolchain the project must live under /mnt/<drive>/… (got $1)" ;;
+  esac
+}
+
+go_path() {
+  if go_is_windows; then wslpath -w "$1"; else printf '%s' "$1"; fi
+}
+
+# ── ipk ──────────────────────────────────────────────────────────────────────
+cmd_ipk() {
+  local bin="" arch="" ver="" project="$PWD" name="" depends="libc, samba4-server, samba4-client" desc=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bin) bin="$2"; shift 2;;
+      --arch) arch="$2"; shift 2;;
+      --version) ver="$2"; shift 2;;
+      --project) project="$2"; shift 2;;
+      --name) name="$2"; shift 2;;
+      --depends) depends="$2"; shift 2;;
+      --desc) desc="$2"; shift 2;;
+      -*) die "unknown option $1";;
+      *) shift;;
+    esac
+  done
+  [ -n "$bin" ] || die "--bin is required"
+  [ -f "$bin" ] || die "no such binary: $bin"
+  [ -n "$arch" ] || die "--arch is required (e.g. aarch64-3.10)"
+  ver="$(project_version "$project" "$ver")"
+  [ -n "$name" ] || name="$(project_name "$project")"
+  [ -n "$desc" ] || desc="Application for Keenetic/Entware routers"
+
+  local work; work="$(mktemp -d)"
+  KD_TMP_WORK="$work"
+  trap 'rm -rf "${KD_TMP_WORK:-}"' EXIT
+  mkdir -p "$work/data/opt/bin" "$work/data/opt/etc/init.d" "$work/data/opt/etc/$name" "$work/control"
+  cp "$bin" "$work/data/opt/bin/$name"; chmod 755 "$work/data/opt/bin/$name"
+
+  if [ -f "$project/packaging/init.d" ]; then
+    sed "s|__APP__|$name|g" "$project/packaging/init.d" > "$work/data/opt/etc/init.d/S99$name"
+  else
+    cat > "$work/data/opt/etc/init.d/S99$name" <<EOF
+#!/bin/sh
+# init script generated by keenetic-dev
+NAME=$name
+BIN=/opt/bin/\$NAME
+CFG=/opt/etc/\$NAME/config.json
+PIDF=/opt/var/run/\$NAME.pid
+LOG=/opt/var/\$NAME/log/app.log
+mkdir -p /opt/var/\$NAME/log /opt/var/run
+case "\$1" in
+  start)
+    [ -x "\$BIN" ] || { echo "\$BIN missing"; exit 1; }
+    "\$BIN" -config "\$CFG" >>"\$LOG" 2>&1 &
+    echo \$! > "\$PIDF"; sleep 1
+    kill -0 "\$(cat "\$PIDF")" 2>/dev/null && echo "\$NAME started" ;;
+  stop)
+    [ -f "\$PIDF" ] && kill "\$(cat "\$PIDF")" 2>/dev/null; rm -f "\$PIDF" ;;
+  restart) "\$0" stop; sleep 1; "\$0" start ;;
+  status)
+    [ -f "\$PIDF" ] && kill -0 "\$(cat "\$PIDF")" 2>/dev/null && echo "\$NAME alive" || echo "\$NAME stopped" ;;
+  *) echo "usage: \$0 {start|stop|restart|status}"; exit 1 ;;
+esac
+EOF
+  fi
+  chmod 755 "$work/data/opt/etc/init.d/S99$name"
+
+  if [ -f "$project/packaging/config.default.json" ]; then
+    cp "$project/packaging/config.default.json" "$work/data/opt/etc/$name/config.json"
+  fi
+
+  local inst_size
+  inst_size=$(du -sk "$work/data" | cut -f1)
+  {
+    echo "Package: $name"
+    echo "Version: $ver"
+    echo "Depends: $depends"
+    echo "Architecture: $arch"
+    echo "Section: net"
+    echo "Priority: optional"
+    echo "Maintainer: keenetic-dev"
+    echo "License: AGPL-3.0-or-later"
+    echo "Installed-Size: $inst_size"
+    echo "Description: $desc"
+    [ -f "$work/data/opt/etc/$name/config.json" ] && echo "Conffiles: /opt/etc/$name/config.json"
+  } > "$work/control/control"
+  if [ -f "$project/packaging/postinst" ]; then
+    sed "s|__APP__|$name|g" "$project/packaging/postinst" > "$work/control/postinst"; chmod 755 "$work/control/postinst"
+  fi
+  if [ -f "$project/packaging/prerm" ]; then
+    sed "s|__APP__|$name|g" "$project/packaging/prerm" > "$work/control/prerm"; chmod 755 "$work/control/prerm"
+  fi
+
+  mkdir -p "$project/dist"
+  local out="$project/dist/${name}_${ver}_${arch}.ipk"
+  ( cd "$work" && echo "2.0" > debian-binary \
+    && tar -czf control.tar.gz -C control . \
+    && tar -czf data.tar.gz -C data . \
+    && tar -cf - ./debian-binary ./control.tar.gz ./data.tar.gz | gzip -9 > "$out" )
+  ok "built $(basename "$out") ($(du -h "$out" | cut -f1))"
+}
+
+# ── feed ─────────────────────────────────────────────────────────────────────
+cmd_feed() {
+  local dir="" ver=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir) dir="$2"; shift 2;;
+      --version) ver="$2"; shift 2;;
+      -*) die "unknown option $1";;
+      *) shift;;
+    esac
+  done
+  [ -n "$dir" ] || dir="$PWD/dist"
+  [ -d "$dir" ] || die "no such dir: $dir"
+  local count=0 tmp
+  tmp="$(mktemp -d)"
+  KD_TMP_FEED="$tmp"
+  trap 'rm -rf "${KD_TMP_FEED:-}"' EXIT
+  : > "$dir/Packages"
+  local ipk pkg version arch depends desc instsize size sha
+  shopt -s nullglob
+  for ipk in "$dir"/*.ipk; do
+    rm -rf "${tmp:?}"/*; mkdir -p "$tmp"
+    tar -xzf "$ipk" -C "$tmp" ./control.tar.gz 2>/dev/null || continue
+    tar -xzf "$tmp/control.tar.gz" -C "$tmp" ./control 2>/dev/null || continue
+    field() { awk -F': ' -v k="$1" '$1==k{print $2; exit}' "$tmp/control"; }
+    pkg="$(field Package)"; version="$(field Version)"; arch="$(field Architecture)"
+    depends="$(field Depends)"; desc="$(field Description)"
+    instsize="$(field Installed-Size)"
+    [ -n "$ver" ] && version="$ver"
+    [ -n "$pkg" ] || continue
+    [ -n "$depends" ] || depends="libc"
+    [ -n "$desc" ] || desc="$pkg for Keenetic/Entware"
+    [ -n "$instsize" ] || instsize="$(du -sk "$tmp" | cut -f1)"
+    size="$(stat -c %s "$ipk")"
+    sha="$(sha256sum "$ipk" | cut -d' ' -f1)"
+    {
+      echo "Package: $pkg"
+      echo "Version: $version"
+      echo "Depends: $depends"
+      echo "Architecture: $arch"
+      echo "Installed-Size: $instsize"
+      echo "Filename: $(basename "$ipk")"
+      echo "Size: $size"
+      echo "SHA256sum: $sha"
+      echo "Section: net"
+      echo "License: AGPL-3.0-or-later"
+      echo "Description: $desc"
+      echo
+    } >> "$dir/Packages"
+    count=$((count + 1))
+  done
+  shopt -u nullglob
+  [ "$count" -gt 0 ] || die "no .ipk files found in $dir"
+  gzip -9 -c "$dir/Packages" > "$dir/Packages.gz"
+  ok "indexed $count packages → $dir/Packages (+ .gz)"
+}
+# ── vendor ───────────────────────────────────────────────────────────────────
+cmd_vendor() {
+  load_config
+  local arches="" roots="samba4-server,samba4-client" out="$PWD/dist/feed"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --arch) arches="$arches $2"; shift 2;;
+      --root) roots="$2"; shift 2;;
+      --out) out="$2"; shift 2;;
+      -*) die "unknown option $1";;
+      *) shift;;
+    esac
+  done
+  [ -n "$arches" ] || arches="aarch64-3.10 armv7-3.2 mipsel-3.4 mips-3.4"
+  mkdir -p "$out"
+  ARCHS="$arches" ROOTS="$roots" OUT="$out" python3 - <<'PY'
+import gzip, io, json, os, re, subprocess, sys, urllib.request
+arches = os.environ["ARCHS"].split()
+roots = [r.strip() for r in os.environ["ROOTS"].split(",") if r.strip()]
+out = os.environ["OUT"]
+report = []
+def fetch(url):
+    with urllib.request.urlopen(url, timeout=120) as r:
+        return r.read()
+def parse(text):
+    pkgs, cur, fields = {}, None, {}
+    for line in text.splitlines():
+        if line.startswith(" ") or line.startswith("\t"):
+            continue
+        m = re.match(r"^([A-Za-z][A-Za-z0-9-]*):\s?(.*)$", line)
+        if m:
+            k, v = m.group(1), m.group(2)
+            if k == "Package":
+                if cur: pkgs[cur] = fields
+                cur, fields = v, {}
+            else:
+                fields[k] = v
+        elif not line.strip() and cur:
+            pkgs[cur] = fields; cur, fields = None, {}
+    if cur: pkgs[cur] = fields
+    return pkgs
+for arch in arches:
+    data = gzip.decompress(fetch(f"https://bin.entware.net/{arch}/Packages.gz")).decode("utf-8", "replace")
+    pkgs = parse(data)
+    need, stack = set(), [r for r in roots if r in pkgs]
+    need.update(stack)
+    while stack:
+        name = stack.pop()
+        for dep in (pkgs[name].get("Depends") or "").split(","):
+            dep = dep.strip().split(" ")[0]
+            if not dep or dep == "libc":
+                continue
+            if dep in pkgs and dep not in need:
+                need.add(dep); stack.append(dep)
+    archdir = os.path.join(out, arch)
+    os.makedirs(archdir, exist_ok=True)
+    rows, total = [], 0
+    for name in sorted(need):
+        p = pkgs[name]
+        fn = os.path.basename(p.get("Filename", ""))
+        dest = os.path.join(archdir, fn)
+        if not os.path.exists(dest):
+            open(dest, "wb").write(fetch(f"https://bin.entware.net/{arch}/{p['Filename']}"))
+        size = os.path.getsize(dest); total += size
+        rows.append({"Package": name, "Version": p.get("Version", ""), "Depends": p.get("Depends", ""),
+                     "Architecture": p.get("Architecture", ""), "FileName": fn, "Size": size})
+    report.append({"arch": arch, "packages": len(rows), "totalMB": round(total / 1048576, 1), "rows": rows})
+    print(f"=== {arch}: {len(rows)} packages, {round(total/1048576,1)} MB")
+json.dump(report, open(os.path.join(out, "closure.json"), "w"), indent=1)
+print("closure saved:", os.path.join(out, "closure.json"))
+PY
+}
+
+# ── publish ──────────────────────────────────────────────────────────────────
+cmd_publish() {
+  local repo="" tag="" dir="" notes="" title=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo="$2"; shift 2;;
+      --tag) tag="$2"; shift 2;;
+      --dir) dir="$2"; shift 2;;
+      --notes) notes="$2"; shift 2;;
+      --name) title="$2"; shift 2;;
+      -*) die "unknown option $1";;
+      *) shift;;
+    esac
+  done
+  [ -n "$repo" ] && [ -n "$tag" ] && [ -n "$dir" ] || die "usage: publish --repo O/R --tag vX --dir DIR"
+  [ -d "$dir" ] || die "no such dir: $dir"
+  need powershell.exe
+  local ps="$SELF_DIR/bin/publish.ps1"
+  local wps wdir wnotes=""
+  wps="$(wslpath -w "$ps")"
+  wdir="$(wslpath -w "$dir")"
+  [ -n "$notes" ] && wnotes="$(wslpath -w "$notes")"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$wps" \
+    -Repo "$repo" -Tag "$tag" -Dir "$wdir" -Name "$title" -NotesFile "$wnotes"
+}
+
+# ── deploy ───────────────────────────────────────────────────────────────────
+cmd_deploy() {
+  load_config
+  local bin="" build="no" project="$PWD"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bin) bin="$2"; shift 2;;
+      --build) build="yes"; shift;;
+      --project) project="$2"; shift 2;;
+      -*) die "unknown option $1";;
+      *) bin="$1"; shift;;
+    esac
+  done
+  if [ "$build" = "yes" ] || [ -z "$bin" ]; then
+    cmd_build --project "$project" --arch arm64 || die "build failed"
+    bin="$project/dist/$(project_name "$project")_linux_arm64"
+  fi
+  [ -f "$bin" ] || die "no such binary: $bin"
+  router_alive || die "router unreachable ($ROUTER_USER@$ROUTER_HOST:$ROUTER_PORT)"
+
+  step "deploy $(basename "$bin") → $ROUTER_HOST:$APP_BIN"
+  local remote_backup="$APP_BIN.bak-$(date +%Y%m%d-%H%M%S)"
+  rssh "cp -a '$APP_BIN' '$remote_backup' 2>/dev/null; echo backup=\$?" >/dev/null 2>&1 || true
+  rssh "'$APP_INIT' stop >/dev/null 2>&1; sleep 2" || true
+  rscp "$bin" "$APP_BIN" || die "scp failed"
+  rssh "chmod 755 '$APP_BIN'" || die "chmod failed"
+  rssh "'$APP_INIT' start >/dev/null 2>&1; sleep 4" || warn "init start returned non-zero"
+
+  local health
+  health=$(rssh "curl -s --max-time 6 http://127.0.0.1:$APP_PORT/api/session" 2>/dev/null)
+  if printf '%s' "$health" | grep -q '"version"'; then
+    ok "deployed: $(printf '%s' "$health" | tr -d '\n' | sed 's/  */ /g')"
+  else
+    warn "health check failed, rolling back"
+    rssh "'$APP_INIT' stop >/dev/null 2>&1; sleep 1; cp -a '$remote_backup' '$APP_BIN' 2>/dev/null; '$APP_INIT' start >/dev/null 2>&1; sleep 3"
+    die "deploy failed, previous binary restored from $remote_backup"
+  fi
+}
+
+# ── operational commands ─────────────────────────────────────────────────────
+cmd_status() {
+  load_config
+  router_alive || die "router unreachable"
+  step "package"
+  rssh "opkg list-installed 2>/dev/null | grep -E '^($APP_NAME|samba4-libs|samba4-server|samba4-client) ' || echo 'app not installed'"
+  step "service"
+  rssh "'$APP_INIT' status 2>/dev/null | tail -1"
+  step "panel"
+  rssh "curl -s --max-time 5 http://127.0.0.1:$APP_PORT/api/session || echo no-answer"
+  step "listeners"
+  rssh "netstat -lntp 2>/dev/null | grep -E '(:$APP_PORT|:$SMB_IP)' || echo none"
+}
+
+cmd_qa() {
+  load_config
+  router_alive || die "router unreachable"
+  local fails=0
+  check() { # name, condition-output
+    if [ "$2" = "1" ]; then ok "$1"; else warn "$1 FAILED"; fails=$((fails + 1)); fi
+  }
+  step "QA on $ROUTER_HOST"
+  check "service alive" "$(rssh "'$APP_INIT' status 2>/dev/null | grep -q alive && echo 1 || echo 0")"
+  check "panel api" "$(rssh "curl -s -o /dev/null -w '%{http_code}' --max-time 6 http://127.0.0.1:$APP_PORT/api/session | grep -q 200 && echo 1 || echo 0")"
+  check "smb listener $SMB_IP:445" "$(rssh "netstat -lnt 2>/dev/null | grep -q '$SMB_IP:445' && echo 1 || echo 0")"
+  check "native NDMS smb untouched" "$(rssh "netstat -lnt 2>/dev/null | grep -q ':445' && echo 1 || echo 0")"
+  check "share mounts" "$(rssh "mount | grep -q cifs && echo 1 || echo 0")"
+  check "aggregated tree" "$(rssh "ls /opt/var/$APP_NAME/share 2>/dev/null | head -1 | grep -q . && echo 1 || echo 0")"
+  check "samba config valid" "$(rssh "testparm -s /opt/etc/$APP_NAME/smb.conf >/dev/null 2>&1 && echo 1 || echo 0")"
+  check "disk space >10%" "$(rssh "df /opt | tail -1 | awk '{print (\$4>0)?1:0}' | grep -q 1 && echo 1 || echo 0")"
+  [ "$fails" -eq 0 ] && ok "all checks passed" || die "$fails check(s) failed"
+}
+
+cmd_logs() {
+  load_config
+  local which="app" lines="60"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --which) which="$2"; shift 2;;
+      --lines) lines="$2"; shift 2;;
+      -*) die "unknown option $1";;
+      *) shift;;
+    esac
+  done
+  router_alive || die "router unreachable"
+  rssh "tail -n $lines '$APP_LOG_DIR/$which.log' 2>/dev/null || echo 'no log at $APP_LOG_DIR/$which.log'"
+}
+
+cmd_setpass() {
+  load_config
+  local new="${1:-}"
+  [ -n "$new" ] || die "usage: keenetic-dev setpass <new-password>"
+  router_alive || die "router unreachable"
+  local cfg="$APP_CFG_DIR/config.json"
+  step "changing panel + admin SMB password"
+  rssh "cp -a '$cfg' '$cfg.bak-setpass' && sed -i 's/\"password\": \"[^\"]*\"/\"password\": \"$new\"/g' '$cfg' && grep -c '$new' '$cfg'" || die "config update failed"
+  rssh "'$APP_INIT' restart >/dev/null 2>&1; sleep 6"
+  local code
+  code=$(rssh "curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:$APP_PORT/api/login -H 'Content-Type: application/json' -d '{\"user\":\"$APP_PANEL_USER\",\"pass\":\"$new\"}'")
+  if [ "$code" = "200" ]; then
+    ok "login with new password works (200)"
+    sed -i "s|^APP_PANEL_PASS=.*|APP_PANEL_PASS=$new|" "$CONFIG_FILE" 2>/dev/null || true
+  else
+    warn "login returned $code — restoring backup"
+    rssh "cp -a '$cfg.bak-setpass' '$cfg'; '$APP_INIT' restart >/dev/null 2>&1"
+    die "password change failed"
+  fi
+}
+
+cmd_ssh() {
+  load_config
+  [ $# -gt 0 ] || die "usage: keenetic-dev ssh <command>"
+  rssh "$*"
+}
+
+# ── self-update ──────────────────────────────────────────────────────────────
+cmd_update() {
+  local check="no"
+  [ "${1:-}" = "--check" ] && check="yes"
+  local local_v; local_v="$(cat "$VERSION_FILE" 2>/dev/null || echo 0)"
+  step "checking for updates ($REPO_SLUG)"
+  if [ -d "$SELF_DIR/.git" ] && git -C "$SELF_DIR" remote get-url origin >/dev/null 2>&1; then
+    git -C "$SELF_DIR" fetch -q origin 2>/dev/null || die "git fetch failed"
+    local remote_v
+    remote_v="$(git -C "$SELF_DIR" show origin/main:VERSION 2>/dev/null | tr -d '\r\n')"
+    [ -n "$remote_v" ] || die "cannot read VERSION from origin/main"
+    log "local: $local_v   remote: $remote_v"
+    if [ "$local_v" = "$remote_v" ]; then ok "up to date"; return 0; fi
+    [ "$check" = "yes" ] && { warn "update available: $remote_v"; return 0; }
+    git -C "$SELF_DIR" pull --ff-only -q || die "git pull failed"
+    ok "updated to $(cat "$VERSION_FILE")"
+    return 0
+  fi
+  local remote_v
+  remote_v="$(curl -fsSL "$REPO_RAW/VERSION" | tr -d '\r\n')"
+  [ -n "$remote_v" ] || die "cannot reach $REPO_RAW"
+  log "local: $local_v   remote: $remote_v"
+  if [ "$local_v" = "$remote_v" ]; then ok "up to date"; return 0; fi
+  [ "$check" = "yes" ] && { warn "update available: $remote_v"; return 0; }
+  step "downloading $remote_v"
+  local tmp; tmp="$(mktemp -d)"
+  curl -fsSL "https://codeload.github.com/$REPO_SLUG/tar.gz/refs/heads/main" | tar -xz -C "$tmp" || die "download failed"
+  local src="$tmp/keenetic-dev-skill-main"
+  [ -d "$src" ] || src="$(find "$tmp" -maxdepth 1 -type d -name '*-main' | head -1)"
+  [ -d "$src" ] || die "unexpected archive layout"
+  ( cd "$src" && find . -type f ! -name 'config.env' -print0 | \
+      while IFS= read -r -d '' f; do mkdir -p "$SELF_DIR/$(dirname "$f")"; cp "$f" "$SELF_DIR/$f"; done )
+  chmod +x "$SELF_DIR/bin/keenetic-dev"
+  rm -rf "$tmp"
+  ok "updated to $(cat "$VERSION_FILE")"
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────────────
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    version|--version|-v) cmd_version;;
+    help|--help|-h) cmd_help;;
+    init) load_config; cmd_init "$@";;
+    build) cmd_build "$@";;
+    ipk) cmd_ipk "$@";;
+    feed) cmd_feed "$@";;
+    vendor) cmd_vendor "$@";;
+    publish) cmd_publish "$@";;
+    deploy) cmd_deploy "$@";;
+    qa) cmd_qa "$@";;
+    status) cmd_status "$@";;
+    logs) cmd_logs "$@";;
+    setpass) cmd_setpass "$@";;
+    ssh) cmd_ssh "$@";;
+    config) cmd_config;;
+    doctor) cmd_doctor;;
+    update) cmd_update "$@";;
+    *) die "unknown command '$cmd' (try: keenetic-dev help)";;
+  esac
+}
+
+main "$@"
