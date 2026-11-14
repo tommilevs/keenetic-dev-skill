@@ -53,6 +53,7 @@ assert "init script shipped" "tar -tzf '$WORK/x/data.tar.gz' | grep -q 'opt/etc/
 assert "arch string correct" "grep -q '^Architecture: aarch64-3.10' '$WORK/x/control'"
 assert "Packages has blank line between stanzas" "python3 -c 'import sys;d=open(sys.argv[1]).read();sys.exit(0 if \"\n\nPackage:\" in d else 1)' '$WORK/app/dist/Packages'"
 assert "Packages.gz exists" "test -s '$WORK/app/dist/Packages.gz'"
+assert "binary is a Linux ELF (not a Windows PE)" "[ \"$(head -c 4 \"$WORK/app/dist/${APP}_linux_arm64\" | od -An -tx1 | tr -d ' \n')\" = \"7f454c46\" ]"
 assert "version injected into binary" "grep -aq '0.1.0' '$WORK/app/dist/${APP}_linux_arm64'"
 
 [ "$fail" -eq 0 ] && echo "== SELFTEST PASSED" || { echo "== SELFTEST FAILED ($fail)"; exit 1; }

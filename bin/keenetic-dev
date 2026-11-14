@@ -267,26 +267,58 @@ cmd_build() {
   go_require_windows_path "$project"
   mkdir -p "$project/dist"
   step "build $name $ver"
-  local a out out_arg rc=0 ent
+  local a out rc=0 ent
   for a in $arches; do
     out="$project/dist/${name}_linux_$a"
-    out_arg="$(go_path "$out")"
     ent="$(arch_to_entware "$a" || echo "$a")"
-    if [ -n "$ldvar" ]; then
-      ( cd "$project" && GOOS=linux GOARCH="$a" CGO_ENABLED=0 GOFLAGS=-buildvcs=false \
-          "$GO_BIN" build -trimpath -ldflags "-s -w -X $ldvar=$ver" -o "$out_arg" ./cmd/... ) \
-        2>"/tmp/keenetic-dev-build-$a.log"
-    else
-      ( cd "$project" && GOOS=linux GOARCH="$a" CGO_ENABLED=0 GOFLAGS=-buildvcs=false \
-          "$GO_BIN" build -trimpath -o "$out_arg" ./cmd/... ) 2>"/tmp/keenetic-dev-build-$a.log"
-    fi
-    if [ -f "$out" ]; then
+    build_one "$project" "$a" "$out" "${ldvar:+$ldvar=$ver}" \
+      2>"/tmp/keenetic-dev-build-$a.log"
+    if [ -f "$out" ] && is_linux_binary "$out"; then
       ok "$(basename "$out") ($(du -h "$out" | cut -f1))  $ent"
     else
       warn "build failed for $a:"; sed 's/^/     /' "/tmp/keenetic-dev-build-$a.log" | head -20; rc=1
+      rm -f "$out"
     fi
   done
   [ "$rc" -eq 0 ] && ok "done: $project/dist" || die "some architectures failed"
+}
+
+# Builds one target. A Windows go.exe does not inherit GOOS/GOARCH through WSL
+# interop, so it is driven by a generated PowerShell script; a native Go is
+# called directly.
+build_one() {
+  local project="$1" goarch="$2" out="$3" ldflag="$4"
+  if go_is_windows; then
+    local ps="$project/dist/.kd-build-$goarch.ps1"
+    mkdir -p "$project/dist"
+    {
+      echo "\$ErrorActionPreference='Stop'"
+      echo "Set-Location -LiteralPath '$(wslpath -w "$project")'"
+      echo "\$env:GOOS='linux'; \$env:GOARCH='$goarch'; \$env:CGO_ENABLED='0'"
+      if [ -n "$ldflag" ]; then
+        echo "& '$(wslpath -w "$GO_BIN")' build -trimpath -buildvcs=false -ldflags '-s -w -X $ldflag' -o '$(wslpath -w "$out")' ./cmd/..."
+      else
+        echo "& '$(wslpath -w "$GO_BIN")' build -trimpath -buildvcs=false -o '$(wslpath -w "$out")' ./cmd/..."
+      fi
+    } > "$ps"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps")"
+    local rc=$?
+    rm -f "$ps"
+    return $rc
+  fi
+  if [ -n "$ldflag" ]; then
+    ( cd "$project" && GOOS=linux GOARCH="$goarch" CGO_ENABLED=0 \
+        "$GO_BIN" build -trimpath -buildvcs=false -ldflags "-s -w -X $ldflag" -o "$out" ./cmd/... )
+  else
+    ( cd "$project" && GOOS=linux GOARCH="$goarch" CGO_ENABLED=0 \
+        "$GO_BIN" build -trimpath -buildvcs=false -o "$out" ./cmd/... )
+  fi
+}
+
+# ELF check: catches the classic mistake of shipping a Windows binary to the router.
+is_linux_binary() {
+  [ -f "$1" ] || return 1
+  [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]
 }
 
 # The Windows Go toolchain cannot read the WSL-only filesystem (/tmp, /home):
