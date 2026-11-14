@@ -1,0 +1,9 @@
+﻿# keep shell scripts and templates byte-identical on Windows checkouts
+* text=auto
+bin/keenetic-dev text eol=lf
+bin/*.cmd text eol=crlf
+bin/*.ps1 text eol=crlf
+tests/*.sh text eol=lf
+templates/app/packaging/init.d text eol=lf
+templates/app/packaging/postinst text eol=lf
+templates/app/packaging/prerm text eol=lf
