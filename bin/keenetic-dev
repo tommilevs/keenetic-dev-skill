@@ -568,12 +568,13 @@ cmd_publish() {
 # ── deploy ───────────────────────────────────────────────────────────────────
 cmd_deploy() {
   load_config
-  local bin="" build="no" project="$PWD"
+  local bin="" build="no" project="$PWD" wait_s=60
   while [ $# -gt 0 ]; do
     case "$1" in
       --bin) bin="$2"; shift 2;;
       --build) build="yes"; shift;;
       --project) project="$2"; shift 2;;
+      --wait) wait_s="$2"; shift 2;;
       -*) die "unknown option $1";;
       *) bin="$1"; shift;;
     esac
@@ -591,10 +592,17 @@ cmd_deploy() {
   rssh "'$APP_INIT' stop >/dev/null 2>&1; sleep 2" || true
   rscp "$bin" "$APP_BIN" || die "scp failed"
   rssh "chmod 755 '$APP_BIN'" || die "chmod failed"
-  rssh "'$APP_INIT' start >/dev/null 2>&1; sleep 4" || warn "init start returned non-zero"
+  rssh "'$APP_INIT' start >/dev/null 2>&1; sleep 2" || warn "init start returned non-zero"
 
-  local health
-  health=$(rssh "curl -s --max-time 6 http://127.0.0.1:$APP_PORT/api/session" 2>/dev/null)
+  # Startup includes Samba bootstrap and CIFS remounts, so poll instead of
+  # checking once: a single short probe caused false rollbacks.
+  step "waiting for $APP_PORT/api/session (up to ${wait_s}s)"
+  local health="" waited=0
+  while [ "$waited" -lt "$wait_s" ]; do
+    health=$(rssh "curl -s --max-time 4 http://127.0.0.1:$APP_PORT/api/session 2>/dev/null" 2>/dev/null)
+    printf '%s' "$health" | grep -q '"version"' && break
+    sleep 2; waited=$((waited + 2))
+  done
   if printf '%s' "$health" | grep -q '"version"'; then
     ok "deployed: $(printf '%s' "$health" | tr -d '\n' | sed 's/  */ /g')"
   else
