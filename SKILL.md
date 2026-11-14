@@ -104,6 +104,26 @@ Feed directory names differ from package architecture strings — do not mix the
 - Samba private dir must be explicit (`private dir = …`), and `smbpasswd -c <conf>`
   avoids "file did not exist" surprises.
 
+## UI checks that catch real bugs
+
+- `all: unset` on buttons resets `box-sizing` to `content-box`: a `width:100%` button
+  then overflows its card. After styling a control with `all: unset`, re-declare
+  `box-sizing: border-box`.
+- After a deploy the browser may still show the previous bundle even with
+  `Cache-Control: no-store` — verify with a cache-busting query (`/?v=N#view`) before
+  concluding that a fix did not work.
+- Persist the active view in `location.hash` and restore it on boot, otherwise F5 on a
+  nested page silently jumps back to the dashboard.
+- Hiding toolbar buttons per page beats disabling them: users read a disabled
+  «Применить» on the logs page as a bug.
+
+## Config editing rules
+
+- Never rewrite `config.json` with a blanket `sed` over `"password"`: it also hits
+  remote-share credentials (and `omitempty` then drops them on the next save).
+  Change secrets through the HTTP API or a targeted field edit, then re-apply mounts.
+- When a remote loses its password, the mount keeps working until the next remount —
+  check `remotes[].password` after bulk edits, not just the mount status.
 ## Deploy loop
 
 `deploy` keeps the previous binary, starts the service and calls

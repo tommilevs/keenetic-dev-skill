@@ -99,3 +99,12 @@ Run `keenetic-dev help` for the full list. Highlights:
 ## License
 
 AGPL-3.0-or-later — see `LICENSE`. Attribution required when redistributing.
+
+## Changelog
+
+- **1.1.0** — build через PowerShell для Windows-Go (GOOS/GOARCH не проходили через WSL
+  interop), `deploy` с поллингом `/api/session` и `--wait`, проверка ELF в самотесте,
+  `vendor` с маппингом архитектур, разделы про UI- и config-грабли; скилл переименован
+  в `keenetic-netcraze-router-dev-skill`.
+- **1.0.0** — первый выпуск: init/build/ipk/feed/vendor/publish/deploy/qa/status/logs/
+  setpass/ssh/doctor/config/update.
