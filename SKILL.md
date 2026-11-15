@@ -91,6 +91,31 @@ Feed directory names differ from package architecture strings — do not mix the
 - Listing packages for foreign architectures in one index is fine, but opkg prints
   `has no valid architecture, ignoring` for them — cosmetic.
 
+## Packaging: keep the user's config alive
+
+An Entware `.ipk` declaring `Conffiles:` still gets its config replaced by the
+packaged default when the package is reinstalled (`opkg install --force-reinstall`).
+"All disks disappeared" was exactly this: the app booted with `remotes: []`.
+
+- `prerm` must copy the live config: `cp -a $CFG $CFG.bak-auto`.
+- `postinst` must restore it. A missing/empty check is not enough — after the
+  replacement the file exists and is valid JSON. Practical rule: if the installed
+  file is **smaller** than the backup, it is the packaged default, so restore the
+  backup (and keep the default aside for diagnostics).
+- The application itself should also keep a rolling copy on every save.
+
+Verify with a real cycle: `opkg install --force-reinstall` → config size, remotes
+count, mounts and service version must all survive.
+
+## Boot resilience for mounts
+
+- Never block bootstrap on network mounts: start Samba first, mount in the
+  background, and retry on a ticker (30 s is a good default).
+- Keep per-remote error and retry counters for the UI; one broken host must not
+  abort the others or stop the SMB service.
+- Test it the honest way: `umount` a disk and watch the watcher remount it; point a
+  remote at an unreachable IP and check the app, the other disks and the status
+  column.
 ## Device quirks
 
 - Kernel CIFS client supports **`vers=2.1`** only; `retrans=` → `EINVAL`; load

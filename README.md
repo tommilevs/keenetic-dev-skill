@@ -102,6 +102,8 @@ AGPL-3.0-or-later — see `LICENSE`. Attribution required when redistributing.
 
 ## Changelog
 
+- **1.2.0** — разделы про сохранность config.json при `opkg --force-reinstall` и про
+  устойчивый bootstrap сетевых монтирований (фоновой watcher, изоляция ошибок).
 - **1.1.0** — build через PowerShell для Windows-Go (GOOS/GOARCH не проходили через WSL
   interop), `deploy` с поллингом `/api/session` и `--wait`, проверка ELF в самотесте,
   `vendor` с маппингом архитектур, разделы про UI- и config-грабли; скилл переименован
