@@ -102,6 +102,8 @@ AGPL-3.0-or-later — see `LICENSE`. Attribution required when redistributing.
 
 ## Changelog
 
+- **1.3.0** — раздел про локализацию: внешние JSON-словари рядом с конфигом,
+  слияние новых ключей без потери переводов, публичные `/api/locales` для экрана входа.
 - **1.2.0** — разделы про сохранность config.json при `opkg --force-reinstall` и про
   устойчивый bootstrap сетевых монтирований (фоновой watcher, изоляция ошибок).
 - **1.1.0** — build через PowerShell для Windows-Go (GOOS/GOARCH не проходили через WSL

@@ -156,6 +156,23 @@ count, mounts and service version must all survive.
 backup automatically. `qa` then checks service, API, SMB listener, mounts and
 `testparm` against the generated config.
 
+## UI localisation that survives updates
+
+Users must be able to add their own language without rebuilding the binary.
+
+- Keep dictionaries as flat JSON files next to the config
+  (`/opt/etc/<app>/locales/en.json`), embedded in the binary as defaults and
+  **materialised on first start**.
+- On start, **merge**: add keys the release introduced into the existing file and
+  never overwrite values the user translated. Log how many keys were added.
+- Serve `GET /api/locales` (list with `_label`) and `GET /api/locales/<code>`
+  **without auth** — the login screen needs translations too.
+- Frontend: translate from the *original* text (WeakMap of node → original), so
+  switching ru → en → ru is lossless; also translate `title`, `placeholder`,
+  `aria-label` and `document.title`.
+- Keep long hints as a single text node (no inline `<code>`…`</code>` in the middle),
+  otherwise the string is split and cannot be looked up.
+- Expose the folder path in the UI so an operator knows where to drop `xx.json`.
 ## Credentials
 
 Router access and panel credentials live in `config.env` (git-ignored) next to
